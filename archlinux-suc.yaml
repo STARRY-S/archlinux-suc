@@ -1,0 +1,125 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: system-upgrade
+  namespace: cattle-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: system-upgrade-executor
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch", "update", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["upgrade.cattle.io"]
+    resources: ["plans", "plans/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system-upgrade-executor-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system-upgrade-executor
+subjects:
+- kind: ServiceAccount
+  name: system-upgrade
+  namespace: cattle-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trigger-archlinux-upgrade
+  namespace: cattle-system
+spec:
+  # Execute on 01:00 every monday
+  #         m h d m w
+  schedule: 0 1 * * 1
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 5
+  successfulJobsHistoryLimit: 5
+  jobTemplate:
+    metadata:
+      namespace: cattle-system
+    spec:
+      template:
+        spec:
+          containers:
+            - image: bitnami/kubectl:latest
+              imagePullPolicy: Always
+              name: patch-plan
+              command:
+                - /bin/bash
+                - '-c'
+                - |
+                  set -exuo pipefail
+
+                  NEW_VERSION="v-$(date +%Y%m%d-%H%M%S)"
+
+                  echo "Updating Plan to version ${NEW_VERSION}..."
+                  kubectl patch plan archlinux-system-upgrade -n cattle-system --type merge -p "{\"spec\":{\"version\":\"${NEW_VERSION}\"}}"
+
+                  echo "Successfully triggered upgrade."
+          serviceAccountName: system-upgrade
+          restartPolicy: OnFailure
+          terminationGracePeriodSeconds: 10
+  suspend: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: archlinux-system-upgrade-config
+  namespace: cattle-system
+type: Opaque
+stringData:
+  upgrade.sh: |
+    #!/bin/bash
+
+    set -ex
+
+    # Ensure the pacman db lock released
+    rm /var/lib/pacman/db.lck || true
+
+    # System upgrade
+    pacman -Syu --noconfirm
+
+    echo "Upgrade complete, rebooting in 10 seconds..."
+    ( sleep 10 && nsenter -t 1 -m -u -i -n reboot ) &
+    exit 0
+---
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: archlinux-system-upgrade
+  namespace: cattle-system
+spec:
+  # The maximum number of concurrent nodes to apply this update on.
+  concurrency: 1
+  # Select which nodes this plan can be applied to.
+  nodeSelector:
+    matchLabels:
+      archlinux-os-upgrade: 'true'
+  serviceAccountName: system-upgrade
+  secrets:
+    - name: archlinux-system-upgrade-config
+      path: /host/run/system-upgrade/secrets/archlinux
+  version: latest
+  drain:
+    # deleteLocalData: true
+    # force: true
+    ignoreDaemonSets: true
+  upgrade:
+    image: archlinux:latest
+    command: ["chroot", "/host"]
+    args: ["bash", "/run/system-upgrade/secrets/archlinux/upgrade.sh"]
+---
