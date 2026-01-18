@@ -10,6 +10,9 @@ kind: ClusterRole
 metadata:
   name: system-upgrade-executor
 rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "patch", "update", "list", "watch"]
@@ -116,7 +119,7 @@ spec:
   version: latest
   drain:
     # deleteLocalData: true
-    # force: true
+    force: true
     ignoreDaemonSets: true
   upgrade:
     image: archlinux:latest
